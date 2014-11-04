@@ -83,10 +83,10 @@ class PodcastPageTests(TestCase):
 
     def setUp(self):
         # create a podcast and some episodes
-        podcast = Podcast.objects.create(id=uuid.uuid1().hex,
+        podcast = Podcast.objects.create(id=uuid.uuid1(),
                                          title='My Podcast')
         for n in range(20):
-            episode = Episode.objects.create(id=uuid.uuid1().hex,
+            episode = Episode.objects.create(id=uuid.uuid1(),
                                              podcast=podcast,
                                             )
             # we only need (the last) one

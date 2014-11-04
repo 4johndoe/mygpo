@@ -25,7 +25,7 @@ from mygpo.podcasts.models import Podcast
 
 
 def create_podcast(**kwargs):
-    return Podcast.objects.create(id=uuid.uuid1().hex, **kwargs)
+    return Podcast.objects.create(id=uuid.uuid1(), **kwargs)
 
 
 class PodcastTests(unittest.TestCase):
