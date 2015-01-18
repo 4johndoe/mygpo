@@ -119,8 +119,15 @@ class MergedIdsModel(models.Model):
         abstract = True
 
 
-class OutdatedModel(models.Model):
+class OutdatedModel(LastUpdateModel):
+    """ A model that can be outdated (no longer available in the source) """
     outdated = models.BooleanField(default=False, db_index=True)
+
+    def set_outdated(self, outdated=True):
+        self.outdated = outdated
+        self.last_update = datetime.utcnow()
+        self.save()
+        logger.info('Marked {0} as outdated={1}'.format(self, outdated))
 
     class Meta:
         abstract = True
@@ -400,10 +407,10 @@ class PodcastManager(GenericManager):
 
 
 class Podcast(UUIDModel, TitleModel, DescriptionModel, LinkModel,
-        LanguageModel, LastUpdateModel, UpdateInfoModel, LicenseModel,
-        FlattrModel, ContentTypesModel, MergedIdsModel, OutdatedModel,
-        AuthorModel, UrlsMixin, SlugsMixin, TagsMixin, MergedUUIDsMixin,
-        TwitterModel, ):
+              LanguageModel, UpdateInfoModel, LicenseModel, FlattrModel,
+              ContentTypesModel, MergedIdsModel, OutdatedModel, AuthorModel,
+              UrlsMixin, SlugsMixin, TagsMixin, MergedUUIDsMixin,
+              TwitterModel, ):
     """ A Podcast """
 
     logo_url = models.URLField(null=True, max_length=1000)
@@ -586,10 +593,9 @@ class EpisodeManager(GenericManager):
 
 
 class Episode(UUIDModel, TitleModel, DescriptionModel, LinkModel,
-        LanguageModel, LastUpdateModel, UpdateInfoModel, LicenseModel,
-        FlattrModel, ContentTypesModel, MergedIdsModel, OutdatedModel,
-        AuthorModel, UrlsMixin, SlugsMixin, MergedUUIDsMixin,
-        OptionallyOrderedModel):
+              LanguageModel, UpdateInfoModel, LicenseModel, FlattrModel,
+              ContentTypesModel, MergedIdsModel, OutdatedModel, AuthorModel,
+              UrlsMixin, SlugsMixin, MergedUUIDsMixin, OptionallyOrderedModel):
     """ An episode """
 
     guid = models.CharField(max_length=200, null=True)

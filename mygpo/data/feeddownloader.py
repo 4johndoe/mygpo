@@ -21,14 +21,16 @@ import os.path
 import urllib2
 import httplib
 import hashlib
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import chain, islice
 import socket
 
 from django.db import transaction
 from django.conf import settings
 
-from mygpo.podcasts.models import Podcast, URL, Slug, Episode
+import podcastparser
+
+from mygpo.podcasts.models import Podcast, Episode
 from mygpo.core.slugs import assign_missing_episode_slugs, PodcastSlug
 from mygpo.podcasts.models import DEFAULT_UPDATE_INTERVAL, \
     MIN_UPDATE_INTERVAL, MAX_UPDATE_INTERVAL
@@ -56,25 +58,129 @@ class NoEpisodesException(Exception):
     """ raised when parsing something that doesn't contain any episodes """
 
 
-class PodcastUpdater(object):
+def update_podcast(url):
+
+    stream = fetch_feed(url)
+
+    parsed = podcastparser.parse(url, stream)
+
+    podcast = get_podcast(url, parsed)
+
+    new_episodes = update_episodes(podcast, parsed)
+
+    num_episodes = order_episodes(podcast)
+
+    update_podcast(podcast, parsed, num_episodes)
+
+    update_categories(podcast, new_episodes)
+
+
+def get_podcast(url, parsed):
+
+    try:
+        validate_parsed(parsed)
+        return Podcast.objects.get_or_create_for_url(url)
+
+    except NoEpisodesException:
+        try:
+            return Podcast.objects.get(urls__url=url)
+        except Podcast.DoesNotExist as dne:
+            raise NoPodcastCreated(dne)
+
+
+def update_podcasts(urls):
     """ Updates a number of podcasts with data from their feeds """
 
-    def update_queue(self, queue):
-        """ Fetch data for the URLs supplied as the queue iterable """
+    for n, url in enumerate(urls, 1):
+        logger.info('Update %d - %s', n, url)
+        try:
+            update_podcast(url)
 
-        for n, podcast_url in enumerate(queue, 1):
-            logger.info('Update %d - %s', n, podcast_url)
-            try:
-                yield self.update(podcast_url)
+        except NoPodcastCreated as npc:
+            logger.info('No podcast created: %s', npc)
 
-            except NoPodcastCreated as npc:
-                logger.info('No podcast created: %s', npc)
+        except:
+            logger.exception('Error while updating podcast "%s"', url)
+            raise
 
-            except:
-                logger.exception('Error while updating podcast "%s"',
-                                 podcast_url)
-                raise
 
+def fetch_feed(url):
+    # TODO: set user agent, etc
+    return urllib2.urlopen(url, timeout=10)
+
+
+def update_episodes(podcast, parsed):
+    # tbd
+    pass
+
+
+def update_categories(podcast, new_episodes):
+    """ checks some practical requirements and updates a category """
+
+    max_timestamp = datetime.utcnow() + timedelta(days=1)
+
+    # no episodes at all
+    if not podcast.latest_episode_timestamp:
+        return
+
+    # no new episode
+    if not new_episodes:
+        return
+
+    # too far in the future
+    if podcast.latest_episode_timestamp > max_timestamp:
+        return
+
+    # not enough subscribers
+    if podcast.subscriber_count() < settings.MIN_SUBSCRIBERS_CATEGORY:
+        return
+
+    update_category(podcast)
+
+
+def validate_parsed(parsed):
+    """ validates the parsed results and raises an exception if invalid
+
+    feedparser parses pretty much everything. We reject anything that
+    doesn't look like a feed"""
+
+    if not parsed or not parsed.episodes:
+        raise NoEpisodesException('no episodes found')
+
+
+@transaction.atomic
+def order_episodes(podcast):
+    """ Reorder the podcast's episode according to release timestamp
+
+    Returns the highest order value (corresponding to the most recent
+    episode) """
+
+    num_episodes = podcast.episode_set.count()
+    if not num_episodes:
+        return 0
+
+    episodes = podcast.episode_set.all().extra(select={
+        'has_released': 'released IS NOT NULL',
+    }).order_by('-has_released', '-released', 'pk').only('pk')
+
+    for n, episode in enumerate(episodes.iterator(), 1):
+        # assign ``order`` from higher (most recent) to 0 (oldest)
+        # None means "unknown"
+        new_order = num_episodes - n
+
+        # optimize for new episodes that are newer than all existing
+        if episode.order == new_order:
+            continue
+
+        logger.info('Updating order from {} to {}'.format(episode.order,
+                                                          new_order))
+        episode.order = new_order
+        episode.save()
+
+    return num_episodes - 1
+
+
+###########
 
     def update(self, podcast_url):
         """ Update the podcast for the supplied URL """
@@ -109,32 +215,6 @@ class PodcastUpdater(object):
         max_episode_order = self._order_episodes(p)
         self._update_podcast(p, parsed, episodes, max_episode_order)
         return p
-
-
-    def verify_podcast_url(self, podcast_url):
-        parsed = self._fetch_feed(podcast_url)
-        self._validate_parsed(parsed)
-        return True
-
-
-    def _fetch_feed(self, podcast_url):
-        import socket
-        t = socket.getdefaulttimeout()
-        socket.setdefaulttimeout(10)
-        return parse_feed(podcast_url, text_processor=ConvertMarkdown())
-        socket.setdefaulttimeout(t)
-
-
-
-    def _validate_parsed(self, parsed):
-        """ validates the parsed results and raises an exception if invalid
-
-        feedparser parses pretty much everything. We reject anything that
-        doesn't look like a feed"""
-
-        if not parsed or not parsed.episodes:
-            raise NoEpisodesException('no episodes found')
-
 
     def _update_podcast(self, podcast, parsed, episodes, max_episode_order):
         """ updates a podcast according to new parser results """
@@ -213,36 +293,10 @@ class PodcastUpdater(object):
         assign_missing_episode_slugs(podcast)
         update_related_podcasts.delay(podcast)
 
-
-    def _update_categories(self, podcast, prev_timestamp):
-        """ checks some practical requirements and updates a category """
-
-        from datetime import timedelta
-
-        max_timestamp = datetime.utcnow() + timedelta(days=1)
-
-        # no episodes at all
-        if not podcast.latest_episode_timestamp:
-            return
-
-        # no new episode
-        if prev_timestamp and podcast.latest_episode_timestamp <= prev_timestamp:
-            return
-
-        # too far in the future
-        if podcast.latest_episode_timestamp > max_timestamp:
-            return
-
-        # not enough subscribers
-        if podcast.subscriber_count() < settings.MIN_SUBSCRIBERS_CATEGORY:
-            return
-
-        update_category(podcast)
-
-
     def _update_episodes(self, podcast, parsed_episodes):
 
         pid = podcast.get_id()
+        print(pid)
 
         # list of (obj, fun) where fun is the function to update obj
         updated_episodes = []
@@ -272,40 +326,7 @@ class PodcastUpdater(object):
 
         logger.info('Marking %d episodes as outdated', len(outdated_episodes))
         for episode in outdated_episodes:
-            mark_outdated(episode)
-
-    @transaction.atomic
-    def _order_episodes(self, podcast):
-        """ Reorder the podcast's episode according to release timestamp
-
-        Returns the highest order value (corresponding to the most recent
-        episode) """
-
-        num_episodes = podcast.episode_set.count()
-        if not num_episodes:
-            return 0
-
-        episodes = podcast.episode_set.all().extra(select={
-                'has_released': 'released IS NOT NULL',
-            })\
-            .order_by('-has_released', '-released', 'pk')\
-            .only('pk')
-
-        for n, episode in enumerate(episodes.iterator(), 1):
-            # assign ``order`` from higher (most recent) to 0 (oldest)
-            # None means "unknown"
-            new_order = num_episodes - n
-
-            # optimize for new episodes that are newer than all existing
-            if episode.order == new_order:
-                continue
-
-            logger.info('Updating order from {} to {}'.format(episode.order,
-                                                              new_order))
-            episode.order = new_order
-            episode.save()
-
-        return num_episodes -1
+            self._mark_outdated(episode)
 
     def _save_podcast_logo(self, cover_art):
         if not cover_art:
@@ -396,16 +417,6 @@ def update_episode(parsed_episode, episode, podcast):
 
     parsed_urls = list(chain.from_iterable(f.urls for f in parsed_episode.files))
     episode.add_missing_urls(parsed_urls)
-
-
-def mark_outdated(obj):
-    """ marks obj outdated if its not already """
-    if obj.outdated:
-        return None
-
-    obj.outdated = True
-    obj.last_update = datetime.utcnow()
-    obj.save()
 
 
 def get_update_interval(episodes):
